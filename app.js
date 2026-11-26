@@ -243,6 +243,7 @@ async function runSearches(s, onlyCats) {
     }
   };
   if (!onlyCats && s.kind) for (const kw of (s.kind.keywords || []).slice(0, 3)) add(await placesCall('keywordSearch', kw, lat, lng, r), true);
+  if (!onlyCats) for (const w of s.words || []) add(await placesCall('keywordSearch', w, lat, lng, r), false);
   for (const c of onlyCats || [...s.cats]) add(await placesCall('categorySearch', c, lat, lng, r), false);
 }
 const fmtDist = d => (d === '' || d == null ? '' : +d >= 1000 ? `${(+d / 1000).toFixed(1)}km` : `${d}m`);
@@ -276,7 +277,7 @@ function openEditor(entry) {
   setLocText();
   $('#btnRetryLoc').hidden = true;
   $('#placeSearch').hidden = true;
-  pickingOnMap = false; $('#map').classList.remove('picking');
+  stopMapPick();
   renderSlots();
   if (view !== 'list') showView('list');
   editor.hidden = false;
@@ -380,7 +381,7 @@ $('#btnHere').onclick = () => {
 };
 
 let suggestSeq = 0;
-async function suggest() {
+async function suggest(opts = {}) {
   if (!draft || draft.lat == null) return;
   const seq = ++suggestSeq, cur = draft;
   clearSuggestions();
@@ -393,9 +394,21 @@ async function suggest() {
   }
   if (seq !== suggestSeq || draft !== cur) return;
   const s = { cur, kind, radiusIdx: 0, cats: new Set(['FD6', 'CE7']), priority: null, showAll: false, found: new Map(), pickedId: null };
+  // 지도에서 찍은 곳이면 가게뿐 아니라 정류장·산·공원·명소·역도 함께 (가까운 순)
+  if (opts.fromMap) { POI_CATS.forEach(c => s.cats.add(c)); s.words = POI_WORDS; }
   if (kind && kind.category !== 'OTHER') { s.cats.add(kind.category); s.priority = kind.category; }
   setStatus(kind ? `사진: ${kind.subject} → ${kind.place_type} 주변에서 찾는 중…` : '주변 장소를 찾는 중…');
-  try { await runSearches(s); }
+  try {
+    await runSearches(s);
+    // 지도에서 찍은 곳: 이름 있는 장소가 없을 때(정류장, 길가 등)를 위해 그 지점의 주소도 맨 위에 넣음
+    if (opts.fromMap) {
+      const addr = await new Promise(res => new kakao.maps.services.Geocoder().coord2Address(cur.lng, cur.lat, (r, st) => {
+        const a = st === kakao.maps.services.Status.OK && r[0];
+        res(a ? (a.road_address ? a.road_address.address_name : a.address.address_name) : null);
+      }));
+      if (addr) s.found = new Map([['addr', { id: 'addr', place_name: addr, category_name: '이 지점의 주소', address_name: addr, distance: '0', x: String(cur.lng), y: String(cur.lat), matched: true }], ...s.found]);
+    }
+  }
   catch (e) { if (seq === suggestSeq) setStatus(e.message); return; }
   if (seq !== suggestSeq || draft !== cur) return;
   sg = s;
@@ -482,11 +495,16 @@ function ensureMap(center, level) {
     map = new kakao.maps.Map(el, { center, level });
     kakao.maps.event.addListener(map, 'click', ev => {
       if (!pickingOnMap || !draft) return;
-      pickingOnMap = false; el.classList.remove('picking');
+      stopMapPick();
       const ll = ev.latLng;
       draft.lat = ll.getLat(); draft.lng = ll.getLng();
       setLocText(`위치: ${draft.lat.toFixed(5)}, ${draft.lng.toFixed(5)} (지도에서 고름)`);
-      suggest();
+      suggest({ fromMap: true });
+    });
+    // 지도를 움직이거나 확대하면 보이는 곳의 장소 이름을 다시 띄움
+    kakao.maps.event.addListener(map, 'idle', () => {
+      if (!pickingOnMap) return;
+      clearTimeout(poiTimer); poiTimer = setTimeout(loadPois, 350);
     });
   } else { map.relayout(); map.setCenter(center); }
 }
@@ -498,10 +516,69 @@ async function startMapPick() {
   const last = current.find(e => e.lat != null);
   const center = draft.lat != null ? new kakao.maps.LatLng(draft.lat, draft.lng)
     : last ? new kakao.maps.LatLng(last.lat, last.lng) : new kakao.maps.LatLng(37.5665, 126.978);
+  clearSuggestions();
   ensureMap(center, 4);
+  markers.forEach(m => m.setMap(null)); markers = [];
   pickingOnMap = true;
   $('#map').classList.add('picking');
-  setStatus('지도를 움직여서 간 곳을 눌러주세요. 그 주변 가게를 찾아드려요.');
+  map.relayout(); map.setCenter(center); // 지도 크기가 커졌으니 다시 맞춤
+  setStatus('지도를 움직여서 간 곳을 찾아주세요.');
+  loadPois();
+}
+
+/* ---------- 지도 위에 누를 수 있는 장소 이름 (산·정류장·명소 등) ---------- */
+const POI_CATS = ['AT4', 'SW8', 'CT1']; // 관광명소, 지하철역, 문화시설
+const POI_WORDS = ['산', '봉우리', '공원']; // 카카오 장소 검색에는 버스정류장이 없어서 제외
+let poiOverlays = [], poiTimer = null, poiSeq = 0;
+function clearPois() { poiOverlays.forEach(o => o.setMap(null)); poiOverlays = []; }
+function stopMapPick() {
+  pickingOnMap = false; poiSeq++; clearTimeout(poiTimer); clearPois();
+  $('#map').classList.remove('picking');
+}
+async function loadPois() {
+  if (!pickingOnMap || !map) return;
+  const seq = ++poiSeq;
+  if (map.getLevel() > 5) {
+    clearPois();
+    setStatus('지도를 조금 더 확대하면 산·정류장·명소 이름이 나와요. 이름을 누르거나, 아무 곳이나 눌러 고르세요.');
+    return;
+  }
+  const S = kakao.maps.services, ps = new S.Places(), bounds = map.getBounds();
+  const call = (method, arg) => new Promise(res => ps[method](arg, (d, st) => res(st === S.Status.OK ? d : []), { bounds }));
+  const results = await Promise.all([...POI_CATS.map(c => call('categorySearch', c)), ...POI_WORDS.map(w => call('keywordSearch', w))]);
+  if (seq !== poiSeq || !pickingOnMap) return;
+  const found = new Map();
+  results.flat().forEach(p => found.set(p.id, p));
+  // 겹쳐서 누르기 힘들지 않게, 화면 가운데에서 가까운 곳부터 일부만 표시 (확대하면 더 보임)
+  const c = map.getCenter(), cy = c.getLat(), cx = c.getLng();
+  const shownPois = [...found.values()]
+    .sort((a, b) => ((+a.y - cy) ** 2 + (+a.x - cx) ** 2) - ((+b.y - cy) ** 2 + (+b.x - cx) ** 2))
+    .slice(0, map.getLevel() <= 2 ? 30 : 14);
+  clearPois();
+  for (const p of shownPois) {
+    const node = document.createElement('button');
+    node.type = 'button'; node.className = 'poi';
+    node.textContent = p.place_name;
+    node.title = (p.category_name || '').split(' > ').slice(-1)[0];
+    node.onclick = ev => { ev.stopPropagation(); choosePoi(p); };
+    const ov = new kakao.maps.CustomOverlay({ position: new kakao.maps.LatLng(+p.y, +p.x), content: node, yAnchor: 1.3, clickable: true, zIndex: 3 });
+    ov.setMap(map); poiOverlays.push(ov);
+  }
+  setStatus(found.size
+    ? `지도 위 이름을 누르면 그 장소가 바로 골라져요. 찾는 이름이 안 보이면 확대하거나, 지도를 눌러주세요.`
+    : '이 근처에는 표시할 이름이 없어요. 간 곳을 지도에서 눌러주세요.');
+}
+function choosePoi(p) {
+  if (!draft) return;
+  stopMapPick();
+  draft.lat = +p.y; draft.lng = +p.x;
+  draft.place = { name: p.place_name, address: p.road_address_name || p.address_name, url: p.place_url, kakaoId: p.id };
+  $('#fPlace').value = p.place_name;
+  setLocText(`위치: ${p.place_name} (${draft.lat.toFixed(5)}, ${draft.lng.toFixed(5)})`);
+  sg = { cur: draft, kind: null, mode: 'search', query: p.place_name, radiusIdx: 0, cats: new Set(), priority: null, showAll: false,
+    pickedId: p.id, found: new Map([[p.id, { ...p, matched: false }]]) };
+  renderCandidates();
+  setStatus(`"${p.place_name}"을(를) 골랐어요. 다르면 다시 "지도에서 찍기"를 눌러주세요.`);
 }
 
 async function searchPlaceByName(q) {
@@ -515,7 +592,7 @@ async function searchPlaceByName(q) {
   const opts = cur.lat != null ? { location: new kakao.maps.LatLng(cur.lat, cur.lng), sort: S.SortBy.DISTANCE } : {};
   const data = await new Promise(res => new S.Places().keywordSearch(q, (d, st) => res(st === S.Status.OK ? d : []), opts));
   if (draft !== cur) return;
-  pickingOnMap = false; $('#map').classList.remove('picking');
+  stopMapPick();
   sg = { cur, kind: null, mode: 'search', query: q, radiusIdx: 0, cats: new Set(), priority: null, showAll: false, pickedId: null,
     found: new Map(data.map(p => [p.id, { ...p, matched: false }])) };
   renderCandidates();
