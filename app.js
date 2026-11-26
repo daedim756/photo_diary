@@ -245,7 +245,8 @@ async function runSearches(s, onlyCats) {
   if (!onlyCats && s.kind) for (const kw of (s.kind.keywords || []).slice(0, 3)) add(await placesCall('keywordSearch', kw, lat, lng, r), true);
   for (const c of onlyCats || [...s.cats]) add(await placesCall('categorySearch', c, lat, lng, r), false);
 }
-const sortedCandidates = s => [...s.found.values()].sort((a, b) =>
+const fmtDist = d => (d === '' || d == null ? '' : +d >= 1000 ? `${(+d / 1000).toFixed(1)}km` : `${d}m`);
+const sortedCandidates = s => s.mode === 'search' ? [...s.found.values()] : [...s.found.values()].sort((a, b) =>
   (b.matched - a.matched)
   || ((b.category_group_code === s.priority) - (a.category_group_code === s.priority))
   || (+a.distance - +b.distance));
@@ -274,6 +275,8 @@ function openEditor(entry) {
   clearSuggestions();
   setLocText();
   $('#btnRetryLoc').hidden = true;
+  $('#placeSearch').hidden = true;
+  pickingOnMap = false; $('#map').classList.remove('picking');
   renderSlots();
   if (view !== 'list') showView('list');
   editor.hidden = false;
@@ -404,17 +407,22 @@ function renderCandidates() {
   if (!s || draft !== s.cur) return;
   const all = sortedCandidates(s), r = RADII[s.radiusIdx];
   const shown = s.showAll ? all : all.slice(0, 8);
-  setStatus(all.length
-    ? `${s.kind ? `사진: ${s.kind.subject} → ${s.kind.place_type}. ` : ''}반경 ${r}m 안에서 ${all.length}곳을 찾았어요.`
-    : `반경 ${r}m 안에서 찾은 곳이 없어요. 범위를 넓히거나 장소를 직접 적어주세요.`);
-  $('#chips').innerHTML = `<span class="chips-label">앞으로 올리기</span>`
-    + CATS.map(([c, n]) => `<button type="button" class="chip${s.priority === c ? ' on' : ''}" data-cat="${c}">${n}</button>`).join('')
-    + (s.radiusIdx < RADII.length - 1 ? `<button type="button" class="chip" data-wide="1">범위 넓히기 → ${RADII[s.radiusIdx + 1]}m</button>` : '');
+  if (s.mode === 'search') {
+    setStatus(all.length ? `"${s.query}" 검색 결과 ${all.length}곳이에요. 맞는 곳을 눌러주세요.` : `"${s.query}"(으)로 찾은 곳이 없어요. 다른 이름으로 검색하거나 "지도에서 찍기"를 써보세요.`);
+    $('#chips').innerHTML = '';
+  } else {
+    setStatus(all.length
+      ? `${s.kind ? `사진: ${s.kind.subject} → ${s.kind.place_type}. ` : ''}반경 ${r}m 안에서 ${all.length}곳을 찾았어요.`
+      : `반경 ${r}m 안에서 찾은 곳이 없어요. 범위를 넓히거나 장소를 직접 골라주세요.`);
+    $('#chips').innerHTML = `<span class="chips-label">앞으로 올리기</span>`
+      + CATS.map(([c, n]) => `<button type="button" class="chip${s.priority === c ? ' on' : ''}" data-cat="${c}">${n}</button>`).join('')
+      + (s.radiusIdx < RADII.length - 1 ? `<button type="button" class="chip" data-wide="1">범위 넓히기 → ${RADII[s.radiusIdx + 1]}m</button>` : '');
+  }
   const ol = $('#candidates');
   ol.innerHTML = shown.map((p, k) => `
     <li><button type="button" data-k="${k}"${s.pickedId === p.id ? ' class="picked"' : ''}>
       <span class="name">${esc(p.place_name)}${p.matched && s.kind ? `<span class="tag">${esc(s.kind.place_type)}</span>` : ''}</span>
-      <span class="dist">${esc(p.distance)}m</span>
+      <span class="dist">${fmtDist(p.distance)}</span>
       <span class="meta">${esc((p.category_name || '').split(' > ').slice(-2).join(' · '))} · ${esc(p.road_address_name || p.address_name)}</span>
     </button></li>`).join('')
     + (all.length > shown.length ? `<li><button type="button" class="more" data-more="1">${all.length - shown.length}곳 더 보기</button></li>` : '');
@@ -422,6 +430,8 @@ function renderCandidates() {
     const p = shown[+b.dataset.k];
     $('#fPlace').value = p.place_name;
     draft.place = { name: p.place_name, address: p.road_address_name || p.address_name, url: p.place_url, kakaoId: p.id };
+    // 고른 가게의 좌표를 이 기록의 위치로 씀 (지도 탭에 정확히 표시됨)
+    if (p.x && p.y) { draft.lat = +p.y; draft.lng = +p.x; setLocText(`위치: ${p.place_name} (${draft.lat.toFixed(5)}, ${draft.lng.toFixed(5)})`); }
     s.pickedId = p.id;
     ol.querySelectorAll('button[data-k]').forEach(x => x.classList.toggle('picked', x === b));
   });
@@ -449,14 +459,75 @@ $('#chips').addEventListener('click', async ev => {
 function drawMap(list) {
   const el = $('#map');
   if (!window.kakao || !kakao.maps || !draft) return;
-  el.hidden = false;
-  const center = new kakao.maps.LatLng(draft.lat, draft.lng);
-  if (!map) map = new kakao.maps.Map(el, { center, level: 3 });
-  else { map.relayout(); map.setCenter(center); }
+  const hasLoc = draft.lat != null;
+  if (!hasLoc && !list.length) return;
+  const center = hasLoc ? new kakao.maps.LatLng(draft.lat, draft.lng) : new kakao.maps.LatLng(+list[0].y, +list[0].x);
+  ensureMap(center, 3);
   markers.forEach(m => m.setMap(null)); markers = [];
-  markers.push(new kakao.maps.Circle({ center, radius: 12, strokeWeight: 2, strokeColor: '#2e6bd6', fillColor: '#2e6bd6', fillOpacity: 0.6, map }));
+  if (hasLoc) markers.push(new kakao.maps.Circle({ center, radius: 12, strokeWeight: 2, strokeColor: '#2e6bd6', fillColor: '#2e6bd6', fillOpacity: 0.6, map }));
   list.forEach(p => markers.push(new kakao.maps.Marker({ position: new kakao.maps.LatLng(+p.y, +p.x), title: p.place_name, map })));
+  if (!hasLoc && list.length > 1) {
+    const b = new kakao.maps.LatLngBounds();
+    list.forEach(p => b.extend(new kakao.maps.LatLng(+p.y, +p.x)));
+    map.setBounds(b, 30, 30, 30, 30);
+  }
 }
+
+// 편집 화면의 작은 지도: 처음 한 번 만들고, "지도에서 찍기" 클릭도 여기서 받음
+let pickingOnMap = false;
+function ensureMap(center, level) {
+  const el = $('#map');
+  el.hidden = false;
+  if (!map) {
+    map = new kakao.maps.Map(el, { center, level });
+    kakao.maps.event.addListener(map, 'click', ev => {
+      if (!pickingOnMap || !draft) return;
+      pickingOnMap = false; el.classList.remove('picking');
+      const ll = ev.latLng;
+      draft.lat = ll.getLat(); draft.lng = ll.getLng();
+      setLocText(`위치: ${draft.lat.toFixed(5)}, ${draft.lng.toFixed(5)} (지도에서 고름)`);
+      suggest();
+    });
+  } else { map.relayout(); map.setCenter(center); }
+}
+
+async function startMapPick() {
+  if (!draft) return;
+  if (!settings.kakao) { setStatus('지도를 쓰려면 위쪽 "설정"에 카카오 키를 넣어주세요.'); return; }
+  try { await loadKakao(); } catch (e) { setStatus(e.message); return; }
+  const last = current.find(e => e.lat != null);
+  const center = draft.lat != null ? new kakao.maps.LatLng(draft.lat, draft.lng)
+    : last ? new kakao.maps.LatLng(last.lat, last.lng) : new kakao.maps.LatLng(37.5665, 126.978);
+  ensureMap(center, 4);
+  pickingOnMap = true;
+  $('#map').classList.add('picking');
+  setStatus('지도를 움직여서 간 곳을 눌러주세요. 그 주변 가게를 찾아드려요.');
+}
+
+async function searchPlaceByName(q) {
+  const cur = draft;
+  if (!cur || !q) return;
+  if (!settings.kakao) { setStatus('장소 검색을 쓰려면 위쪽 "설정"에 카카오 키를 넣어주세요.'); return; }
+  setStatus(`"${q}" 찾는 중…`);
+  try { await loadKakao(); } catch (e) { setStatus(e.message); return; }
+  const S = kakao.maps.services;
+  // 위치를 알면 가까운 순, 모르면 카카오가 정한 정확도 순
+  const opts = cur.lat != null ? { location: new kakao.maps.LatLng(cur.lat, cur.lng), sort: S.SortBy.DISTANCE } : {};
+  const data = await new Promise(res => new S.Places().keywordSearch(q, (d, st) => res(st === S.Status.OK ? d : []), opts));
+  if (draft !== cur) return;
+  pickingOnMap = false; $('#map').classList.remove('picking');
+  sg = { cur, kind: null, mode: 'search', query: q, radiusIdx: 0, cats: new Set(), priority: null, showAll: false, pickedId: null,
+    found: new Map(data.map(p => [p.id, { ...p, matched: false }])) };
+  renderCandidates();
+}
+
+$('#btnPlaceSearch').onclick = () => {
+  const f = $('#placeSearch');
+  f.hidden = !f.hidden;
+  if (!f.hidden) { $('#placeQuery').value = $('#fPlace').value.trim(); $('#placeQuery').focus(); }
+};
+$('#placeSearch').addEventListener('submit', ev => { ev.preventDefault(); searchPlaceByName($('#placeQuery').value.trim()); });
+$('#btnMapPick').onclick = () => startMapPick();
 
 document.querySelectorAll('.slot').forEach(el => {
   const i = +el.dataset.slot;

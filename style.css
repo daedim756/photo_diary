@@ -69,6 +69,11 @@ button:disabled { opacity: .55; cursor: default; }
 .locbox { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
 .locline { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 13.5px; }
 .locbtns { display: flex; gap: 6px; flex-wrap: wrap; }
+.pickrow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.pickrow-label { font-size: 12.5px; color: var(--muted); margin-right: 2px; }
+.placesearch { display: flex; gap: 6px; margin-top: 8px; }
+.placesearch input { flex: 1; min-width: 0; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); }
+.map.picking { outline: 3px solid var(--accent); cursor: crosshair; }
 .map { height: 180px; border-radius: 8px; margin-top: 8px; overflow: hidden; }
 .candidates { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .candidates li button {

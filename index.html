@@ -73,9 +73,18 @@
             <span class="locbtns">
               <button class="small" id="btnRetryLoc" hidden>다시 찾기</button>
               <button class="small" id="btnFromFiles" title="폰에서 위치 정보가 지워질 때, 파일 앱으로 원본을 골라요">파일에서 대표 사진 고르기</button>
-              <button class="small" id="btnHere">현재 위치 사용</button>
             </span>
           </div>
+          <div class="pickrow">
+            <span class="pickrow-label">장소 직접 고르기</span>
+            <button type="button" class="small" id="btnPlaceSearch">이름으로 검색</button>
+            <button type="button" class="small" id="btnMapPick">지도에서 찍기</button>
+            <button type="button" class="small" id="btnHere">현재 위치</button>
+          </div>
+          <form class="placesearch" id="placeSearch" hidden>
+            <input type="search" id="placeQuery" placeholder="가게·장소 이름 (예: 홍짬뽕 미사, 롯데시네마 하남)" autocomplete="off">
+            <button type="submit" class="small primary">검색</button>
+          </form>
           <div id="suggestStatus" class="hint"></div>
           <div id="map" class="map" hidden></div>
           <div id="chips" class="chips"></div>
