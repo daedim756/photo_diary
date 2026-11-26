@@ -205,7 +205,7 @@ function loadKakao() {
     const s = document.createElement('script');
     s.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${encodeURIComponent(settings.kakao)}&libraries=services&autoload=false`;
     s.onload = () => window.kakao && window.kakao.maps ? kakao.maps.load(() => res(kakao)) : rej(new Error('카카오 지도를 불러오지 못했어요'));
-    s.onerror = () => rej(new Error('카카오 지도를 불러오지 못했어요. 키와 등록한 사이트 주소를 확인해주세요.'));
+    s.onerror = () => rej(new Error(`카카오 지도를 불러오지 못했어요. 카카오 개발자 사이트의 JavaScript SDK 도메인에 ${location.origin} 이 등록돼 있는지 확인해주세요.`));
     document.head.appendChild(s);
   });
   kakaoReady.catch(() => { kakaoReady = null; });
