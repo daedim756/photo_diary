@@ -265,6 +265,7 @@ function openEditor(entry) {
     created: entry ? entry.created : Date.now(),
     photos: photos.slice(0, SLOT_COUNT), sizes: [], names: names.slice(0, SLOT_COUNT),
     lat: entry?.lat ?? null, lng: entry?.lng ?? null, place: entry?.placeInfo || null,
+    taken: entry?.takenAt ?? null,
   };
   $('#fDate').value = entry ? entry.date : '';
   $('#fPlace').value = entry ? entry.place || '' : '';
@@ -306,6 +307,7 @@ async function setPhoto(i, file) {
   let exif = {};
   if (i === 0) {
     exif = await readExif(file);
+    draft.taken = exif.taken || null; draft.offset = exif.offset || null; // 찍은 시각: Week 탭에서 하루 동선 순서에 씀
     if (exif.date) { $('#fDate').value = exif.date; setHint('사진의 촬영 날짜를 읽었습니다.', true); }
     else { $('#fDate').value = toISO(new Date(file.lastModified)); setHint('사진에 촬영 날짜 정보가 없어 파일 날짜를 넣었습니다. 필요하면 고쳐주세요.'); }
   }
@@ -513,7 +515,7 @@ $('#btnSave').onclick = async () => {
       id: draft.id, created: draft.created, updated: Date.now(),
       date: $('#fDate').value, place, memo: $('#fMemo').value,
       main: draft.photos[0], extras: draft.photos.slice(1), photoNames: names,
-      lat: draft.lat, lng: draft.lng,
+      lat: draft.lat, lng: draft.lng, takenAt: draft.taken || null,
       placeInfo: draft.place && draft.place.name === place ? draft.place : null,
       remoteModified: old ? old.remoteModified : null,
       trash: [...((old && old.trash) || []), ...removed], dirty: true,
@@ -525,7 +527,7 @@ $('#btnSave').onclick = async () => {
 
 /* ================= 원드라이브 동기화 ================= */
 // 원드라이브 앱 폴더 구조: entries/<id>.json (글), photos/<이름>.jpg (사진), settings.json (카카오 키)
-const META_KEYS = ['id', 'date', 'place', 'memo', 'lat', 'lng', 'placeInfo', 'created', 'updated'];
+const META_KEYS = ['id', 'date', 'place', 'memo', 'lat', 'lng', 'placeInfo', 'created', 'updated', 'takenAt'];
 const newPhotoName = (id, i) => `${id}-${i}-${Math.random().toString(36).slice(2, 8)}.jpg`;
 let syncing = null, lastSync = 0;
 
@@ -711,12 +713,14 @@ function showView(v) {
   $('#viewList').hidden = v !== 'list';
   $('#viewMap').hidden = v !== 'map';
   $('#viewCal').hidden = v !== 'cal';
+  $('#viewWeek').hidden = v !== 'week';
   try { localStorage.setItem('view', v); } catch { /* 무시 */ }
   refreshViews();
 }
 function refreshViews() {
   if (view === 'map') renderBigMap();
   else if (view === 'cal') renderCal();
+  else if (view === 'week') renderWeek();
 }
 document.querySelectorAll('.tabs button').forEach(b => (b.onclick = () => showView(b.dataset.view)));
 
@@ -816,6 +820,50 @@ function shiftMonth(n) {
 $('#calPrev').onclick = () => shiftMonth(-1);
 $('#calNext').onclick = () => shiftMonth(1);
 $('#calToday').onclick = () => { calMonth = toISO(new Date()).slice(0, 7); calAuto = false; renderCal(); };
+
+/* ---------- Week 보기: 월~일, 하루 안에서는 찍은 시간 순 ---------- */
+const DOW_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const isoToDate = iso => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (iso, n) => { const d = isoToDate(iso); d.setDate(d.getDate() + n); return toISO(d); };
+const mondayOf = iso => addDays(iso, -((isoToDate(iso).getDay() + 6) % 7));
+const dotted = iso => iso.replace(/-/g, '.');
+// 찍은 시각이 있으면 그걸로, 없으면(예전 기록) 기록을 쓴 시각으로 정렬
+const timeKey = e => e.takenAt || (e.created ? `${e.date}T${new Date(e.created).toTimeString().slice(0, 8)}` : `${e.date}T99`);
+let weekStart = null, weekAuto = false;
+
+function renderWeek() {
+  if (!weekStart || (weekAuto && current.length)) {
+    weekStart = mondayOf(current.length ? current[0].date : toISO(new Date()));
+    weekAuto = !current.length;
+  }
+  $('#weekTitle').textContent = `${dotted(weekStart)} ~ ${dotted(addDays(weekStart, 6))}`;
+  const today = toISO(new Date());
+  let html = '';
+  for (let i = 0; i < 7; i++) {
+    const iso = addDays(weekStart, i), [, m, d] = iso.split('-').map(Number);
+    const items = current.filter(e => e.date === iso).sort((a, b) => timeKey(a).localeCompare(timeKey(b)));
+    html += `<section class="wk-day${items.length ? '' : ' wk-empty'}${iso === today ? ' today' : ''}">
+      <h3><span class="wk-dow${i === 5 ? ' sat' : i === 6 ? ' sun' : ''}">${DOW_EN[i]}</span><span class="wk-date">${m}.${d}</span>${items.length ? `<span class="wk-count">${items.length}곳</span>` : ''}</h3>`;
+    if (items.length) {
+      html += '<div class="wk-items">' + items.map((e, k) => {
+        const url = mainUrl.get(e.id);
+        const time = e.takenAt ? e.takenAt.slice(11, 16) : '';
+        return (k ? '<div class="wk-step" aria-hidden="true">↓</div>' : '')
+          + `<button type="button" class="wk-item" data-id="${esc(e.id)}">`
+          + (url ? `<img src="${url}" alt="">` : '<div class="ph"></div>')
+          + `<div class="wk-text"><div class="wk-place">${time ? `<span class="wk-time">${time}</span>` : ''}${esc(e.place || '장소 없음')}</div>`
+          + (e.memo ? `<div class="wk-memo">${esc(e.memo)}</div>` : '')
+          + '</div></button>';
+      }).join('') + '</div>';
+    }
+    html += '</section>';
+  }
+  $('#weekList').innerHTML = html;
+}
+$('#weekList').addEventListener('click', ev => { const b = ev.target.closest('.wk-item'); if (b) goToEntry(b.dataset.id); });
+$('#weekPrev').onclick = () => { weekStart = addDays(weekStart, -7); weekAuto = false; renderWeek(); };
+$('#weekNext').onclick = () => { weekStart = addDays(weekStart, 7); weekAuto = false; renderWeek(); };
+$('#weekNow').onclick = () => { weekStart = mondayOf(toISO(new Date())); weekAuto = false; renderWeek(); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#lightbox').hidden = true; });
 
 /* ================= 백업 ================= */
@@ -852,7 +900,7 @@ $('#importFile').onchange = async e => {
 updateKeyNote();
 setSyncUI();
 render().catch(() => { list.innerHTML = '<p class="empty">이 브라우저에서는 저장 공간을 쓸 수 없어요.</p>'; });
-try { const v = localStorage.getItem('view'); if (v === 'map' || v === 'cal') showView(v); } catch { /* 무시 */ }
+try { const v = localStorage.getItem('view'); if (['map', 'cal', 'week'].includes(v)) showView(v); } catch { /* 무시 */ }
 od.handleRedirect()
   .then(justSignedIn => {
     if (justSignedIn && !sessionStorage.getItem('silentTriedAt')) toast('원드라이브에 연결했어요.');
