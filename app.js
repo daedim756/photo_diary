@@ -305,7 +305,7 @@ async function setPhoto(i, file) {
     if (exif.lat != null) { draft.lat = exif.lat; draft.lng = exif.lng; setLocText(); suggest(); }
     else {
       draft.lat = draft.lng = null; clearSuggestions();
-      setLocText('위치: 이 사진에는 위치 정보가 없어요. 지금 그 장소에 있다면 "현재 위치 사용"을 눌러주세요.');
+      setLocText('위치: 이 사진에는 위치 정보가 없어요. 폰에서 올렸다면 "파일에서 대표 사진 고르기"로 다시 골라보거나, 지금 그 장소라면 "현재 위치 사용"을 눌러주세요.');
     }
   }
 }
@@ -391,6 +391,13 @@ document.querySelectorAll('.slot').forEach(el => {
   });
 });
 pick.addEventListener('change', () => setPhoto(pickTarget, pick.files[0]));
+$('#btnFromFiles').onclick = () => { $('#pickFile').value = ''; $('#pickFile').click(); };
+$('#pickFile').addEventListener('change', () => {
+  const f = $('#pickFile').files[0];
+  if (!f) return;
+  if (!f.type.startsWith('image/') && !/\.(jpe?g|png|webp|heic)$/i.test(f.name)) { toast('사진 파일을 골라주세요.'); return; }
+  setPhoto(0, f.type ? f : new File([f], f.name, { type: 'image/jpeg', lastModified: f.lastModified }));
+});
 
 const dbGet = id => tx('readonly', s => s.get(id));
 $('#btnCancel').onclick = closeEditor;
