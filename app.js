@@ -113,10 +113,18 @@ function parseTiff(v, start) {
   const out = {};
   const ifd0 = ifd(u32(4));
   let dt = null;
-  if (ifd0[0x8769]) { const ex = ifd(ifd0[0x8769]); dt = ex[0x9003] || ex[0x9004]; }
+  if (ifd0[0x8769]) {
+    const ex = ifd(ifd0[0x8769]);
+    dt = ex[0x9003] || ex[0x9004];
+    const off = ex[0x9011] || ex[0x9010]; // 촬영 시각의 시간대 (예: +09:00)
+    if (typeof off === 'string' && /^[+-]\d{2}:\d{2}$/.test(off)) out.offset = off;
+  }
   dt = dt || ifd0[0x0132];
-  const m = dt && dt.match(/^(\d{4}):(\d{2}):(\d{2})/);
-  if (m && m[1] !== '0000') out.date = `${m[1]}-${m[2]}-${m[3]}`;
+  const m = dt && dt.match(/^(\d{4}):(\d{2}):(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2}))?/);
+  if (m && m[1] !== '0000') {
+    out.date = `${m[1]}-${m[2]}-${m[3]}`;
+    if (m[4]) out.taken = `${out.date}T${m[4]}:${m[5]}:${m[6]}`; // 초 단위 촬영 시각 (원드라이브에서 같은 사진 찾을 때 씀)
+  }
   if (ifd0[0x8825]) {
     const g = ifd(ifd0[0x8825]);
     const dms = a => Array.isArray(a) && a.length >= 3 ? a[0] + a[1] / 60 + a[2] / 3600 : null;
@@ -264,6 +272,7 @@ function openEditor(entry) {
   setHint(entry ? '' : '대표 사진을 올리면 촬영 날짜가 자동으로 들어갑니다.');
   clearSuggestions();
   setLocText();
+  $('#btnRetryLoc').hidden = true;
   renderSlots();
   if (view !== 'list') showView('list');
   editor.hidden = false;
@@ -309,11 +318,52 @@ async function setPhoto(i, file) {
     if (exif.lat != null) { draft.lat = exif.lat; draft.lng = exif.lng; setLocText(); suggest(); }
     else {
       draft.lat = draft.lng = null; clearSuggestions();
-      setLocText('위치: 이 사진에는 위치 정보가 없어요. 폰에서 올렸다면 "파일에서 대표 사진 고르기"로 다시 골라보거나, 지금 그 장소라면 "현재 위치 사용"을 눌러주세요.');
+      draft.taken = exif.taken || null; draft.offset = exif.offset || null;
+      lookupFromOneDrive();
     }
   }
 }
 
+// 갤러리에서 고르면 폰이 위치를 지우므로, 원드라이브 카메라 백업의 같은 사진(촬영 시각으로 찾음)에서 위치를 가져옴
+async function lookupFromOneDrive() {
+  const cur = draft;
+  if (!cur) return;
+  $('#btnRetryLoc').hidden = true;
+  if (!cur.taken) { setLocText('위치: 이 사진에는 위치 정보가 없어요. 지금 그 장소라면 "현재 위치 사용"을 눌러주세요.'); return; }
+  if (!od.configured() || !od.signedIn()) {
+    setLocText('위치: 사진에 위치가 없어요. 원드라이브에 연결돼 있으면 카메라 백업에서 위치를 찾아올 수 있어요.');
+    return;
+  }
+  setLocText('위치: 원드라이브 카메라 백업에서 같은 사진을 찾는 중…');
+  try {
+    const r = await od.findPhotoLocation(cur.taken, cur.offset);
+    if (draft !== cur) return;
+    let loc = r && r.lat != null ? r : null;
+    if (r && r.blob) { const ex = await readExif(r.blob); if (ex.lat != null) loc = { lat: ex.lat, lng: ex.lng }; }
+    if (draft !== cur) return;
+    if (loc) {
+      cur.lat = loc.lat; cur.lng = loc.lng;
+      setLocText(`위치: ${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)} (원드라이브 백업에서 찾음)`);
+      suggest();
+    } else if (r) {
+      setLocText('위치: 원드라이브에서 같은 사진을 찾았지만, 그 사진에도 위치 정보가 없어요. 카메라 앱의 위치 태그가 꺼져 있었을 수 있어요.');
+    } else {
+      setLocText('위치: 원드라이브 카메라 백업에서 같은 사진을 아직 못 찾았어요. 백업이 끝난 뒤 "다시 찾기"를 눌러주세요.');
+      $('#btnRetryLoc').hidden = false;
+    }
+  } catch (e) {
+    if (draft !== cur) return;
+    if (e instanceof od.NeedsConsent || e instanceof od.AuthNeeded) {
+      setSyncUI();
+      setLocText('위치: 원드라이브 사진을 읽으려면 한 번 허락이 필요해요. 이 기록을 저장하거나 취소한 뒤, 위쪽 "원드라이브 다시 연결"을 눌러 허용해주세요.');
+    } else {
+      setLocText(`위치: 원드라이브에서 찾지 못했어요 (${e.message}).`);
+      $('#btnRetryLoc').hidden = false;
+    }
+  }
+}
+
+$('#btnRetryLoc').onclick = () => lookupFromOneDrive();
 $('#btnHere').onclick = () => {
   if (!navigator.geolocation) { toast('이 브라우저는 위치를 알려주지 않아요.'); return; }
   setLocText('위치: 현재 위치를 찾는 중…');

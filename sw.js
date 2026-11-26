@@ -1,5 +1,5 @@
 // 앱 화면을 저장해 두고, 인터넷이 느리거나 끊겨도 열리게 함 (항상 새 버전을 먼저 시도)
-const CACHE = 'photo-diary-v5';
+const CACHE = 'photo-diary-v6';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'onedrive.js', 'config.js', 'icon.svg', 'manifest.webmanifest'];
 
 self.addEventListener('install', e => {

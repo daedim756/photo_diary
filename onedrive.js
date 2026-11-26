@@ -2,7 +2,9 @@
 import { MS_CLIENT_ID } from './config.js';
 
 const AUTH = 'https://login.microsoftonline.com/consumers/oauth2/v2.0';
-const SCOPE = 'Files.ReadWrite.AppFolder offline_access';
+// Files.Read: 카메라 백업 사진에서 위치를 읽기 위해 (읽기 전용)
+const SCOPE = 'Files.ReadWrite.AppFolder Files.Read offline_access';
+const DRIVE = 'https://graph.microsoft.com/v1.0/me/drive';
 const ROOT = 'https://graph.microsoft.com/v1.0/me/drive/special/approot';
 const TOKEN_KEY = 'msToken';
 
@@ -74,6 +76,7 @@ export async function handleRedirect() {
 }
 
 export class AuthNeeded extends Error {}
+export class NeedsConsent extends Error {}
 async function accessToken() {
   const t = loadToken();
   if (!t) throw new AuthNeeded('로그인이 필요해요');
@@ -111,6 +114,59 @@ export async function listFolder(folder) {
   }
   return out;
 }
+/* ---------- 카메라 백업에서 같은 사진 찾기 ---------- */
+// 폴더 하나를 최근 것부터 훑으며 촬영 시각이 같은 사진을 찾음. 하위 폴더 목록도 함께 돌려줌.
+async function scanFolder(id, target, isMatch) {
+  let url = `${DRIVE}/items/${id}/children?$top=200&$orderby=lastModifiedDateTime desc`, ordered = true;
+  const folders = [];
+  for (let page = 0; url && page < 20; page++) {
+    let res = await graph(url);
+    if (res.status === 400 && ordered) { ordered = false; url = `${DRIVE}/items/${id}/children?$top=200`; res = await graph(url); }
+    if (res.status === 403) { signOut(); throw new NeedsConsent('원드라이브 사진을 읽을 권한이 필요해요'); }
+    if (!res.ok) throw new Error(`원드라이브 사진 목록 실패 (${res.status})`);
+    const data = await res.json(), items = data.value || [];
+    for (const it of items) {
+      if (it.folder) folders.push(it);
+      else if (isMatch(it)) return { item: it, folders };
+    }
+    // 최근 수정 순이면, 촬영보다 한참 전에 올라온 파일부터는 볼 필요 없음
+    const last = items[items.length - 1];
+    if (ordered && last && Date.parse(last.lastModifiedDateTime) < target - 3 * 86400000) break;
+    url = data['@odata.nextLink'];
+  }
+  return { item: null, folders };
+}
+
+// taken: 'YYYY-MM-DDTHH:MM:SS'(사진에 적힌 촬영 시각), offset: '+09:00' 또는 null
+// 찾으면 {lat, lng} 또는 {blob}(원본 파일), 못 찾으면 null
+export async function findPhotoLocation(taken, offset) {
+  const target = offset ? Date.parse(taken + offset) : new Date(taken).getTime();
+  const isMatch = it => {
+    const t = it.photo && it.photo.takenDateTime;
+    if (!t) return false;
+    // 원드라이브는 시간대 없이 적힌 시각을 그대로 UTC처럼 기록하기도 해서 두 방식 모두 비교
+    return Math.abs(Date.parse(t) - target) <= 2000 || t.slice(0, 19) === taken;
+  };
+  const res = await graph(`${DRIVE}/special/cameraroll`);
+  if (res.status === 404) return null;
+  if (res.status === 403) { signOut(); throw new NeedsConsent('원드라이브 사진을 읽을 권한이 필요해요'); }
+  if (!res.ok) throw new Error(`원드라이브 카메라 폴더 확인 실패 (${res.status})`);
+  const root = await res.json();
+  let { item, folders } = await scanFolder(root.id, target, isMatch);
+  // 연도/월 폴더로 정리해 두는 경우 (예: 2026 / 11)
+  const [y, mo] = taken.split('-');
+  for (const wanted of [[y], [mo, String(+mo), `${y}-${mo}`, `${y}${mo}`, `${y}.${mo}`]]) {
+    if (item) break;
+    const f = folders.find(x => wanted.includes(x.name));
+    if (!f) break;
+    ({ item, folders } = await scanFolder(f.id, target, isMatch));
+  }
+  if (!item) return null;
+  const loc = item.location;
+  if (loc && loc.latitude != null && loc.longitude != null) return { lat: loc.latitude, lng: loc.longitude };
+  return { blob: await download(item) }; // 위치가 따로 없으면 원본 파일에서 읽음
+}
+
 // 목록에서 받은 항목(또는 경로)의 내용을 받아옴
 export async function download(itemOrPath) {
   let item = itemOrPath;
