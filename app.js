@@ -423,7 +423,25 @@ document.querySelectorAll('.slot').forEach(el => {
   });
 });
 pick.addEventListener('change', () => setPhoto(pickTarget, pick.files[0]));
-$('#btnFromFiles').onclick = () => { $('#pickFile').value = ''; $('#pickFile').click(); };
+// 설치한 앱(홈 화면 앱)에서는 일반 파일 선택이 갤러리로 바로 넘어가는 경우가 있어서,
+// 되는 기기에서는 시스템 "파일 열기" 창(원본 그대로 받음)을 먼저 씀
+$('#btnFromFiles').onclick = async () => {
+  if (window.showOpenFilePicker) {
+    try {
+      const [h] = await window.showOpenFilePicker({
+        types: [{ description: '사진', accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.webp', '.heic'] } }],
+        excludeAcceptAllOption: false, multiple: false,
+      });
+      const f = await h.getFile();
+      setPhoto(0, f.type ? f : new File([f], f.name, { type: 'image/jpeg', lastModified: f.lastModified }));
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return; // 사용자가 취소
+      // 지원하지 않거나 막힌 경우 아래 방식으로
+    }
+  }
+  $('#pickFile').value = ''; $('#pickFile').click();
+};
 $('#pickFile').addEventListener('change', () => {
   const f = $('#pickFile').files[0];
   if (!f) return;
