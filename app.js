@@ -211,33 +211,36 @@ function loadKakao() {
   kakaoReady.catch(() => { kakaoReady = null; });
   return kakaoReady;
 }
-function placesCall(method, arg, lat, lng) {
+function placesCall(method, arg, lat, lng, radius = SEARCH_RADIUS) {
   return new Promise(res => {
     const S = kakao.maps.services;
     new S.Places()[method](arg, (data, status) => res(status === S.Status.OK ? data : []), {
-      location: new kakao.maps.LatLng(lat, lng), radius: SEARCH_RADIUS, sort: S.SortBy.DISTANCE,
+      location: new kakao.maps.LatLng(lat, lng), radius, sort: S.SortBy.DISTANCE,
     });
   });
 }
-async function searchNearby(lat, lng, kind) {
+
+// 후보 찾기 상태. 버튼은 후보를 "더하거나 앞으로 올리기"만 하고 절대 빼지 않음.
+const CATS = [['FD6', '음식점'], ['CE7', '카페'], ['AT4', '관광명소'], ['CT1', '문화시설']];
+const RADII = [SEARCH_RADIUS, 700, 1500];
+let sg = null;
+async function runSearches(s, onlyCats) {
   await loadKakao();
-  const found = new Map();
+  const { lat, lng } = s.cur, r = RADII[s.radiusIdx];
   const add = (list, matched) => {
     for (const p of list) {
-      const prev = found.get(p.id);
-      if (!prev) found.set(p.id, { ...p, matched });
+      const prev = s.found.get(p.id);
+      if (!prev) s.found.set(p.id, { ...p, matched });
       else if (matched) prev.matched = true;
     }
   };
-  if (kind) {
-    for (const kw of (kind.keywords || []).slice(0, 3)) add(await placesCall('keywordSearch', kw, lat, lng), true);
-    if (kind.category && kind.category !== 'OTHER') add(await placesCall('categorySearch', kind.category, lat, lng), false);
-  }
-  if (found.size < 3) for (const c of ['FD6', 'CE7']) add(await placesCall('categorySearch', c, lat, lng), false);
-  return [...found.values()]
-    .sort((a, b) => (b.matched - a.matched) || (+a.distance - +b.distance))
-    .slice(0, 8);
+  if (!onlyCats && s.kind) for (const kw of (s.kind.keywords || []).slice(0, 3)) add(await placesCall('keywordSearch', kw, lat, lng, r), true);
+  for (const c of onlyCats || [...s.cats]) add(await placesCall('categorySearch', c, lat, lng, r), false);
 }
+const sortedCandidates = s => [...s.found.values()].sort((a, b) =>
+  (b.matched - a.matched)
+  || ((b.category_group_code === s.priority) - (a.category_group_code === s.priority))
+  || (+a.distance - +b.distance));
 
 /* ================= 편집기 ================= */
 let draft = null, pickTarget = 0, map = null, markers = [];
@@ -262,6 +265,7 @@ function openEditor(entry) {
   clearSuggestions();
   setLocText();
   renderSlots();
+  if (view !== 'list') showView('list');
   editor.hidden = false;
   editor.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -273,7 +277,7 @@ function setLocText(msg) {
     : '위치: 대표 사진을 올리면 찍은 위치를 읽어요.');
 }
 function setStatus(msg) { $('#suggestStatus').textContent = msg || ''; }
-function clearSuggestions() { $('#candidates').innerHTML = ''; $('#map').hidden = true; setStatus(''); }
+function clearSuggestions() { sg = null; $('#candidates').innerHTML = ''; $('#chips').innerHTML = ''; $('#map').hidden = true; setStatus(''); }
 
 function renderSlots() {
   document.querySelectorAll('.slot').forEach(el => {
@@ -325,7 +329,7 @@ async function suggest() {
   if (!draft || draft.lat == null) return;
   const seq = ++suggestSeq, cur = draft;
   clearSuggestions();
-  if (!settings.kakao) { setStatus('설정에 카카오 키를 넣으면 주변 가게 후보를 보여드려요.'); return; }
+  if (!settings.kakao) { setStatus('주변 가게 찾기를 쓰려면 위쪽 "설정"에 카카오 키를 넣어주세요.'); return; }
   let kind = null;
   if (settings.claude && cur.photos[0]) {
     setStatus('사진을 보고 어떤 곳인지 알아보는 중…');
@@ -333,34 +337,62 @@ async function suggest() {
     catch (e) { setStatus(`사진 판별 실패(${e.status || e.message}). 주변 음식점·카페로 찾을게요.`); }
   }
   if (seq !== suggestSeq || draft !== cur) return;
-  if (kind) setStatus(`사진: ${kind.subject} → ${kind.place_type} 주변에서 찾는 중…`);
-  else if (!settings.claude) setStatus('주변 음식점·카페를 찾는 중…');
-  let list;
-  try { list = await searchNearby(cur.lat, cur.lng, kind); }
+  const s = { cur, kind, radiusIdx: 0, cats: new Set(['FD6', 'CE7']), priority: null, showAll: false, found: new Map(), pickedId: null };
+  if (kind && kind.category !== 'OTHER') { s.cats.add(kind.category); s.priority = kind.category; }
+  setStatus(kind ? `사진: ${kind.subject} → ${kind.place_type} 주변에서 찾는 중…` : '주변 장소를 찾는 중…');
+  try { await runSearches(s); }
   catch (e) { if (seq === suggestSeq) setStatus(e.message); return; }
   if (seq !== suggestSeq || draft !== cur) return;
-  setStatus(list.length
-    ? (kind ? `사진: ${kind.subject} → ${kind.place_type}. 반경 ${SEARCH_RADIUS}m 후보예요.` : `반경 ${SEARCH_RADIUS}m 안의 음식점·카페예요.`)
-    : `반경 ${SEARCH_RADIUS}m 안에서 찾은 곳이 없어요. 장소를 직접 적어주세요.`);
-  renderCandidates(list, kind);
+  sg = s;
+  renderCandidates();
 }
 
-function renderCandidates(list, kind) {
+function renderCandidates() {
+  const s = sg;
+  if (!s || draft !== s.cur) return;
+  const all = sortedCandidates(s), r = RADII[s.radiusIdx];
+  const shown = s.showAll ? all : all.slice(0, 8);
+  setStatus(all.length
+    ? `${s.kind ? `사진: ${s.kind.subject} → ${s.kind.place_type}. ` : ''}반경 ${r}m 안에서 ${all.length}곳을 찾았어요.`
+    : `반경 ${r}m 안에서 찾은 곳이 없어요. 범위를 넓히거나 장소를 직접 적어주세요.`);
+  $('#chips').innerHTML = `<span class="chips-label">앞으로 올리기</span>`
+    + CATS.map(([c, n]) => `<button type="button" class="chip${s.priority === c ? ' on' : ''}" data-cat="${c}">${n}</button>`).join('')
+    + (s.radiusIdx < RADII.length - 1 ? `<button type="button" class="chip" data-wide="1">범위 넓히기 → ${RADII[s.radiusIdx + 1]}m</button>` : '');
   const ol = $('#candidates');
-  ol.innerHTML = list.map((p, k) => `
-    <li><button type="button" data-k="${k}">
-      <span class="name">${esc(p.place_name)}${p.matched && kind ? `<span class="tag">${esc(kind.place_type)}</span>` : ''}</span>
+  ol.innerHTML = shown.map((p, k) => `
+    <li><button type="button" data-k="${k}"${s.pickedId === p.id ? ' class="picked"' : ''}>
+      <span class="name">${esc(p.place_name)}${p.matched && s.kind ? `<span class="tag">${esc(s.kind.place_type)}</span>` : ''}</span>
       <span class="dist">${esc(p.distance)}m</span>
       <span class="meta">${esc((p.category_name || '').split(' > ').slice(-2).join(' · '))} · ${esc(p.road_address_name || p.address_name)}</span>
-    </button></li>`).join('');
-  ol.querySelectorAll('button').forEach(b => b.onclick = () => {
-    const p = list[+b.dataset.k];
+    </button></li>`).join('')
+    + (all.length > shown.length ? `<li><button type="button" class="more" data-more="1">${all.length - shown.length}곳 더 보기</button></li>` : '');
+  ol.querySelectorAll('button[data-k]').forEach(b => b.onclick = () => {
+    const p = shown[+b.dataset.k];
     $('#fPlace').value = p.place_name;
     draft.place = { name: p.place_name, address: p.road_address_name || p.address_name, url: p.place_url, kakaoId: p.id };
-    ol.querySelectorAll('button').forEach(x => x.classList.toggle('picked', x === b));
+    s.pickedId = p.id;
+    ol.querySelectorAll('button[data-k]').forEach(x => x.classList.toggle('picked', x === b));
   });
-  drawMap(list);
+  const more = ol.querySelector('[data-more]');
+  if (more) more.onclick = () => { s.showAll = true; renderCandidates(); };
+  drawMap(shown);
 }
+
+$('#chips').addEventListener('click', async ev => {
+  const b = ev.target.closest('button'), s = sg;
+  if (!b || !s) return;
+  b.disabled = true;
+  try {
+    if (b.dataset.cat) {
+      const c = b.dataset.cat;
+      s.priority = s.priority === c ? null : c;
+      if (!s.cats.has(c)) { s.cats.add(c); setStatus('찾는 중…'); await runSearches(s, [c]); }
+    } else if (b.dataset.wide) {
+      s.radiusIdx++; setStatus('범위를 넓혀서 찾는 중…'); await runSearches(s);
+    }
+  } catch (e) { setStatus(e.message); }
+  if (sg === s) renderCandidates();
+});
 
 function drawMap(list) {
   const el = $('#map');
@@ -433,7 +465,11 @@ function setSyncUI(state, detail) {
   const b = $('#btnSync');
   if (!od.configured()) { b.hidden = true; return; }
   b.hidden = false;
-  if (!od.signedIn()) { b.textContent = '원드라이브 연결'; b.disabled = false; b.title = '원드라이브에 로그인해서 폰과 컴퓨터를 동기화해요'; return; }
+  if (!od.signedIn()) {
+    b.textContent = od.wasConnected() ? '원드라이브 다시 연결' : '원드라이브 연결';
+    b.disabled = false; b.title = '원드라이브에 로그인해서 폰과 컴퓨터를 동기화해요';
+    return;
+  }
   b.disabled = state === 'busy';
   b.textContent = state === 'busy' ? '동기화 중…' : state === 'error' ? '동기화 실패 · 다시' : '동기화';
   b.title = detail || (lastSync ? `마지막 동기화 ${new Date(lastSync).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}` : '');
@@ -511,7 +547,11 @@ async function sync() {
       lastSync = Date.now();
       setSyncUI('idle');
     } catch (e) {
-      if (e instanceof od.AuthNeeded) { setSyncUI(); toast('원드라이브 로그인이 끝났어요. "원드라이브 연결"을 눌러 다시 로그인해주세요.', 6000); }
+      if (e instanceof od.AuthNeeded) {
+        // 쓰는 중이 아니면 화면 없이 자동으로 다시 로그인. 쓴 기록은 기기에 남아 있다가 돌아오면 올라감.
+        if (editor.hidden && $('#settings').hidden && od.trySilentSignIn()) return;
+        setSyncUI(); toast('원드라이브 로그인이 만료됐어요. "원드라이브 다시 연결"을 눌러주세요.', 6000);
+      }
       else { setSyncUI('error', e.message); toast('동기화하지 못했어요: ' + e.message, 6000); }
     } finally { syncing = null; render(); }
   })();
@@ -531,10 +571,16 @@ const days = ['일', '월', '화', '수', '목', '금', '토'];
 async function render() {
   urls.forEach(URL.revokeObjectURL); urls = [];
   current = (await dbAll()).filter(e => !e.deleted && e.date).sort((a, b) => b.date.localeCompare(a.date) || b.created - a.created);
-  if (!current.length) { list.innerHTML = '<p class="empty">아직 기록이 없어요. “+ 새 기록”을 눌러 첫 사진을 올려보세요.</p>'; return; }
   const u = b => { const x = URL.createObjectURL(b); urls.push(x); return x; };
+  mainUrl = new Map(current.filter(e => e.main).map(e => [e.id, u(e.main)]));
+  refreshViews();
+  if (!current.length) { $('#searchInfo').textContent = ''; list.innerHTML = '<p class="empty">아직 기록이 없어요. “+ 새 기록”을 눌러 첫 사진을 올려보세요.</p>'; return; }
+  const q = $('#search').value.trim().toLowerCase();
+  const shownList = q ? current.filter(e => matchesSearch(e, q)) : current;
+  $('#searchInfo').textContent = q ? `검색 결과 ${shownList.length}개` : '';
+  if (!shownList.length) { list.innerHTML = '<p class="empty">검색 결과가 없어요.</p>'; return; }
   let html = '', lastMonth = '';
-  for (const e of current) {
+  for (const e of shownList) {
     const [y, m, d] = e.date.split('-').map(Number);
     const month = `${y}년 ${m}월`;
     if (month !== lastMonth) { html += `<div class="month">${month}</div>`; lastMonth = month; }
@@ -544,7 +590,7 @@ async function render() {
     const addr = pi ? `<div class="addr">${esc(pi.address)}${/^https:\/\//.test(pi.url || '') ? ` · <a href="${esc(pi.url)}" target="_blank" rel="noopener">지도</a>` : ''}</div>` : '';
     html += `
       <article class="entry" data-id="${esc(e.id)}">
-        ${e.main ? `<img class="main-img" src="${u(e.main)}" alt="">` : '<div class="main-img"></div>'}
+        ${mainUrl.has(e.id) ? `<img class="main-img" src="${mainUrl.get(e.id)}" alt="">` : '<div class="main-img"></div>'}
         <div>
           <h2>${m}월${d}일 (${dow})${e.place ? ' — ' + esc(e.place) : ''}</h2>
           ${addr}
@@ -578,6 +624,130 @@ list.addEventListener('click', async ev => {
   }
 });
 $('#lightbox').onclick = () => ($('#lightbox').hidden = true);
+
+/* ================= 검색 ================= */
+function matchesSearch(e, q) {
+  const [y, m, d] = e.date.split('-').map(Number);
+  const hay = [e.place, e.memo, e.placeInfo && e.placeInfo.address, e.date, `${m}월${d}일`, `${m}월 ${d}일`, `${y}년 ${m}월`, `${y}년${m}월`]
+    .filter(Boolean).join(' ').toLowerCase();
+  return q.split(/\s+/).every(w => hay.includes(w));
+}
+let searchTimer;
+$('#search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(render, 200); });
+
+/* ================= 보기 전환 (목록 / 지도 / 캘린더) ================= */
+let view = 'list', mainUrl = new Map();
+function showView(v) {
+  view = v;
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === v));
+  $('#viewList').hidden = v !== 'list';
+  $('#viewMap').hidden = v !== 'map';
+  $('#viewCal').hidden = v !== 'cal';
+  try { localStorage.setItem('view', v); } catch { /* 무시 */ }
+  refreshViews();
+}
+function refreshViews() {
+  if (view === 'map') renderBigMap();
+  else if (view === 'cal') renderCal();
+}
+document.querySelectorAll('.tabs button').forEach(b => (b.onclick = () => showView(b.dataset.view)));
+
+// 지도·캘린더에서 누르면 목록의 그 기록으로 이동
+async function goToEntry(id) {
+  showView('list');
+  if ($('#search').value) { $('#search').value = ''; await render(); }
+  const el = list.querySelector(`.entry[data-id="${CSS.escape(id)}"]`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1800);
+}
+async function goToDate(iso) { showView('list'); $('#search').value = iso; await render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+
+/* ---------- 지도 보기 ---------- */
+let bigMap = null, bigOverlays = [];
+async function renderBigMap() {
+  const info = $('#mapInfo'), sel = $('#mapMonth');
+  const withLoc = current.filter(e => e.lat != null && e.lng != null);
+  const months = [...new Set(withLoc.map(e => e.date.slice(0, 7)))].sort().reverse();
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">전체 기간</option>' + months.map(m => `<option value="${m}">${+m.slice(0, 4)}년 ${+m.slice(5)}월</option>`).join('');
+  sel.value = months.includes(prev) ? prev : '';
+  const items = sel.value ? withLoc.filter(e => e.date.startsWith(sel.value)) : withLoc;
+  const noLoc = current.length - withLoc.length;
+  if (!settings.kakao) { info.textContent = '지도를 보려면 위쪽 "설정"에 카카오 키를 넣어주세요.'; return; }
+  try { await loadKakao(); } catch (e) { info.textContent = e.message; return; }
+  if (view !== 'map') return;
+  if (!bigMap) bigMap = new kakao.maps.Map($('#bigMap'), { center: new kakao.maps.LatLng(37.5665, 126.978), level: 8 });
+  else bigMap.relayout();
+  bigOverlays.forEach(o => o.setMap(null)); bigOverlays = [];
+  info.textContent = `${items.length}곳` + (noLoc ? ` · 위치 정보가 없는 기록 ${noLoc}개는 지도에 안 나와요.` : '');
+  if (!items.length) return;
+  const bounds = new kakao.maps.LatLngBounds();
+  for (const e of [...items].reverse()) {
+    const pos = new kakao.maps.LatLng(e.lat, e.lng);
+    bounds.extend(pos);
+    const node = document.createElement('button');
+    node.type = 'button'; node.className = 'pin';
+    const url = mainUrl.get(e.id);
+    if (url) { const img = document.createElement('img'); img.src = url; img.alt = ''; node.appendChild(img); }
+    const label = document.createElement('span');
+    const [, m, d] = e.date.split('-').map(Number);
+    label.textContent = `${m}/${d} ${e.place || ''}`.trim();
+    node.appendChild(label);
+    node.onclick = () => goToEntry(e.id);
+    const ov = new kakao.maps.CustomOverlay({ position: pos, content: node, yAnchor: 1, clickable: true });
+    ov.setMap(bigMap); bigOverlays.push(ov);
+  }
+  if (items.length === 1) { bigMap.setLevel(4); bigMap.setCenter(new kakao.maps.LatLng(items[0].lat, items[0].lng)); }
+  else bigMap.setBounds(bounds, 60, 40, 40, 40);
+}
+$('#mapMonth').onchange = () => renderBigMap();
+
+/* ---------- 캘린더 보기 ---------- */
+let calMonth = null, calAuto = false; // 'YYYY-MM'
+function renderCal() {
+  // 처음에는 가장 최근 기록이 있는 달을 보여줌 (기록을 불러오기 전이면 이번 달로 두었다가 바꿈)
+  if (!calMonth || (calAuto && current.length)) {
+    calMonth = current.length ? current[0].date.slice(0, 7) : toISO(new Date()).slice(0, 7);
+    calAuto = !current.length;
+  }
+  const [y, m] = calMonth.split('-').map(Number);
+  $('#calTitle').textContent = `${y}년 ${m}월`;
+  const lead = new Date(y, m - 1, 1).getDay(), days = new Date(y, m, 0).getDate();
+  const byDay = new Map();
+  for (const e of current) {
+    if (!e.date.startsWith(calMonth + '-')) continue;
+    const d = +e.date.slice(8);
+    if (!byDay.has(d)) byDay.set(d, []);
+    byDay.get(d).push(e);
+  }
+  const todayIso = toISO(new Date());
+  let html = ['일', '월', '화', '수', '목', '금', '토'].map((w, i) => `<div class="cal-dow${i === 0 ? ' sun' : i === 6 ? ' sat' : ''}">${w}</div>`).join('');
+  for (let i = 0; i < lead; i++) html += '<div class="cal-cell empty"></div>';
+  for (let d = 1; d <= days; d++) {
+    const dayList = (byDay.get(d) || []).slice().reverse(); // 그날 먼저 쓴 기록이 대표
+    const e = dayList[0], iso = `${calMonth}-${String(d).padStart(2, '0')}`, dow = (lead + d - 1) % 7;
+    const url = e && mainUrl.get(e.id);
+    html += `<div class="cal-cell${e ? ' has' : ''}${iso === todayIso ? ' today' : ''}"${e ? ` data-id="${esc(e.id)}" data-iso="${iso}" data-n="${dayList.length}" role="button" tabindex="0" title="${esc(e.place || '')}"` : ''}>`
+      + (url ? `<img src="${url}" alt="">` : '')
+      + `<span class="cal-d${dow === 0 ? ' sun' : dow === 6 ? ' sat' : ''}">${d}</span>`
+      + (e ? `<span class="cal-place">${esc(e.place || '기록')}${dayList.length > 1 ? ` +${dayList.length - 1}` : ''}</span>` : '')
+      + '</div>';
+  }
+  $('#calGrid').innerHTML = html;
+}
+function openCalCell(c) { if (!c) return; +c.dataset.n > 1 ? goToDate(c.dataset.iso) : goToEntry(c.dataset.id); }
+$('#calGrid').addEventListener('click', ev => openCalCell(ev.target.closest('.cal-cell[data-id]')));
+$('#calGrid').addEventListener('keydown', ev => { if (ev.key === 'Enter') openCalCell(ev.target.closest('.cal-cell[data-id]')); });
+function shiftMonth(n) {
+  const [y, m] = calMonth.split('-').map(Number), d = new Date(y, m - 1 + n, 1);
+  calMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  calAuto = false;
+  renderCal();
+}
+$('#calPrev').onclick = () => shiftMonth(-1);
+$('#calNext').onclick = () => shiftMonth(1);
+$('#calToday').onclick = () => { calMonth = toISO(new Date()).slice(0, 7); calAuto = false; renderCal(); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#lightbox').hidden = true; });
 
 /* ================= 백업 ================= */
@@ -614,7 +784,12 @@ $('#importFile').onchange = async e => {
 updateKeyNote();
 setSyncUI();
 render().catch(() => { list.innerHTML = '<p class="empty">이 브라우저에서는 저장 공간을 쓸 수 없어요.</p>'; });
+try { const v = localStorage.getItem('view'); if (v === 'map' || v === 'cal') showView(v); } catch { /* 무시 */ }
 od.handleRedirect()
-  .then(justSignedIn => { if (justSignedIn) toast('원드라이브에 연결했어요.'); sync(); })
+  .then(justSignedIn => {
+    if (justSignedIn && !sessionStorage.getItem('silentTriedAt')) toast('원드라이브에 연결했어요.');
+    if (!od.signedIn() && od.trySilentSignIn()) return; // 만료됐으면 앱을 열 때 자동으로 다시 로그인
+    sync();
+  })
   .catch(e => { setSyncUI(); toast('원드라이브 로그인 실패: ' + e.message, 6000); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

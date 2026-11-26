@@ -81,6 +81,51 @@ button:disabled { opacity: .55; cursor: default; }
 .candidates .meta { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
 .candidates .tag { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; margin-left: 6px; vertical-align: 1px; }
 
+/* 후보 버튼 */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.chips:empty { display: none; }
+.chips-label { font-size: 12px; color: var(--muted); }
+.chip { font-size: 12.5px; padding: 3px 10px; border-radius: 999px; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.candidates .more { width: 100%; text-align: center; color: var(--accent); background: transparent; border-style: dashed; }
+
+/* 보기 탭 */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 0 0 16px; }
+.tabs button { border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: transparent; padding: 8px 14px; color: var(--muted); font-weight: 500; }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 700; }
+.searchbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.searchbar input { flex: 1 1 260px; min-width: 0; font: inherit; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink); }
+.viewbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.viewbar select { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); }
+
+/* 지도 보기 */
+.bigmap { height: min(70vh, 640px); border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--slot); }
+.pin {
+  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 0; border: 0; background: transparent; cursor: pointer;
+  transform: translateY(-4px);
+}
+.pin img { width: 46px; height: 46px; object-fit: cover; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.35); background: #ddd; }
+.pin span { font-size: 11.5px; font-weight: 700; color: #1f1e1c; background: #fff; border-radius: 6px; padding: 1px 6px; box-shadow: 0 1px 3px rgba(0,0,0,.25); max-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 캘린더 보기 */
+.cal-head h2 { margin: 0; font-size: 18px; min-width: 120px; text-align: center; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.cal-dow { text-align: center; font-size: 12px; color: var(--muted); padding: 4px 0; }
+.cal-dow.sun, .cal-d.sun { color: var(--danger); }
+.cal-dow.sat, .cal-d.sat { color: var(--accent); }
+.cal-cell { position: relative; aspect-ratio: 1; border-radius: 8px; background: var(--card); border: 1px solid var(--line); overflow: hidden; }
+.cal-cell.empty { background: transparent; border-color: transparent; }
+.cal-cell.today { border-color: var(--accent); }
+.cal-cell.has { cursor: pointer; }
+.cal-cell img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.cal-d { position: absolute; top: 3px; left: 5px; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cal-cell.has .cal-d { color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.7); }
+.cal-place {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 4px 3px; font-size: 11px; font-weight: 700; color: #fff;
+  background: linear-gradient(transparent, rgba(0,0,0,.65)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.entry.flash { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
 /* 목록 */
 .month { font-size: 14px; font-weight: 700; color: var(--muted); margin: 26px 0 10px; letter-spacing: .03em; }
 .entry {
@@ -115,4 +160,7 @@ button:disabled { opacity: .55; cursor: default; }
   .entry .extras img { width: 100%; height: auto; aspect-ratio: 4/3; }
   .entry h2 { padding-right: 0; }
   .entry .tools { position: static; justify-content: flex-end; }
+  .cal-place { font-size: 9.5px; padding: 8px 2px 2px; }
+  .cal-d { font-size: 10.5px; }
+  .cal-grid { gap: 2px; }
 }

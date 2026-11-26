@@ -17,19 +17,33 @@ function saveToken(t) {
   localStorage.setItem(TOKEN_KEY, JSON.stringify({
     access: t.access_token, refresh: t.refresh_token, expires: Date.now() + (t.expires_in - 120) * 1000,
   }));
+  localStorage.setItem('msConnected', '1');
 }
 export const signedIn = () => !!loadToken();
+// 토큰은 만료돼도 "예전에 연결했던 기기"인지는 기억해서 자동 재로그인에 씀
+export const wasConnected = () => localStorage.getItem('msConnected') === '1';
 export function signOut() { localStorage.removeItem(TOKEN_KEY); }
 
-export async function signIn() {
+export async function signIn({ silent = false } = {}) {
   const verifier = randomStr(48), state = randomStr(16);
   const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
-  sessionStorage.setItem('pkce', JSON.stringify({ verifier, state }));
+  sessionStorage.setItem('pkce', JSON.stringify({ verifier, state, silent }));
   const q = new URLSearchParams({
     client_id: MS_CLIENT_ID, response_type: 'code', redirect_uri: redirectUri(), scope: SCOPE,
-    code_challenge: challenge, code_challenge_method: 'S256', state, prompt: 'select_account',
+    code_challenge: challenge, code_challenge_method: 'S256', state,
+    prompt: silent ? 'none' : 'select_account', // none: Microsoft에 이미 로그인돼 있으면 화면 없이 바로 돌아옴
   });
   location.href = `${AUTH}/authorize?${q}`;
+}
+
+// 로그인이 만료됐을 때 화면 없이 다시 로그인을 시도. 10분에 한 번만 (반복 방지).
+export function trySilentSignIn() {
+  if (!configured() || signedIn() || !wasConnected()) return false;
+  const last = +(sessionStorage.getItem('silentTriedAt') || 0);
+  if (Date.now() - last < 10 * 60 * 1000) return false;
+  sessionStorage.setItem('silentTriedAt', String(Date.now()));
+  signIn({ silent: true });
+  return true;
 }
 
 async function tokenRequest(params) {
@@ -48,9 +62,12 @@ export async function handleRedirect() {
   const p = new URLSearchParams(location.search);
   if (!p.has('code') && !p.has('error')) return false;
   history.replaceState(null, '', location.pathname);
-  if (p.has('error')) throw new Error(p.get('error_description') || p.get('error'));
   const saved = JSON.parse(sessionStorage.getItem('pkce') || 'null');
   sessionStorage.removeItem('pkce');
+  if (p.has('error')) {
+    if (saved && saved.silent) return false; // 자동 재로그인 실패: 조용히 넘어가고 버튼으로 안내
+    throw new Error(p.get('error_description') || p.get('error'));
+  }
   if (!saved || saved.state !== p.get('state')) throw new Error('로그인 확인값이 맞지 않아요. 다시 로그인해주세요.');
   await tokenRequest({ grant_type: 'authorization_code', code: p.get('code'), redirect_uri: redirectUri(), code_verifier: saved.verifier });
   return true;
