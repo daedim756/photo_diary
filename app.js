@@ -265,7 +265,7 @@ function openEditor(entry) {
   draft = {
     id: entry ? entry.id : (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
     created: entry ? entry.created : Date.now(),
-    photos: photos.slice(0, SLOT_COUNT), sizes: [], names: names.slice(0, SLOT_COUNT),
+    photos: photos.slice(0, SLOT_COUNT), sizes: [], names: names.slice(0, SLOT_COUNT), meta: [],
     lat: entry?.lat ?? null, lng: entry?.lng ?? null, place: entry?.placeInfo || null,
     taken: entry?.takenAt ?? null,
   };
@@ -299,18 +299,35 @@ function renderSlots() {
     if (el._url) { URL.revokeObjectURL(el._url); el._url = null; }
     if (blob) {
       el._url = URL.createObjectURL(blob);
-      el.innerHTML = `<img src="${el._url}" alt=""><button class="x" title="빼기" aria-label="사진 빼기">✕</button>`
+      el.innerHTML = `<img src="${el._url}" alt="" draggable="false"><button class="x" title="빼기" aria-label="사진 빼기">✕</button>`
+        + (i > 0 ? '<button class="mk-main" title="이 사진을 대표 사진으로">대표로</button>' : '')
         + (draft.sizes[i] ? `<span class="size">${draft.sizes[i]}</span>` : '');
       el.classList.add('filled');
-    } else { el.innerHTML = slotLabels[i]; el.classList.remove('filled'); }
+      el.draggable = true;
+    } else { el.innerHTML = slotLabels[i]; el.classList.remove('filled'); el.draggable = false; }
   });
+}
+
+// 두 칸의 사진 자리 바꾸기 (복제 아님). 대표 사진이 바뀌면 그 사진의 날짜·위치를 씀.
+function swapSlots(a, b) {
+  if (!draft || a === b) return;
+  for (const k of ['photos', 'names', 'sizes', 'meta']) {
+    const arr = draft[k];
+    [arr[a], arr[b]] = [arr[b], arr[a]];
+  }
+  renderSlots();
+  if (a !== 0 && b !== 0) return;
+  const m = draft.meta[0];
+  if (m && m.date) { $('#fDate').value = m.date; setHint('대표 사진의 촬영 날짜로 바꿨어요.', true); }
+  if (m) { draft.taken = m.taken || null; draft.offset = m.offset || null; }
+  if (m && m.lat != null) { draft.lat = m.lat; draft.lng = m.lng; setLocText(); suggest(); }
+  toast('대표 사진을 바꿨어요.');
 }
 
 async function setPhoto(i, file) {
   if (!draft || !file || !file.type.startsWith('image/')) return;
-  let exif = {};
+  const exif = await readExif(file); // 모든 칸에서 읽어 둠: 나중에 대표 사진으로 바꿀 때 씀
   if (i === 0) {
-    exif = await readExif(file);
     draft.taken = exif.taken || null; draft.offset = exif.offset || null; // 찍은 시각: Week 탭에서 하루 동선 순서에 씀
     if (exif.date) { $('#fDate').value = exif.date; setHint('사진의 촬영 날짜를 읽었습니다.', true); }
     else { $('#fDate').value = toISO(new Date(file.lastModified)); setHint('사진에 촬영 날짜 정보가 없어 파일 날짜를 넣었습니다. 필요하면 고쳐주세요.'); }
@@ -319,6 +336,7 @@ async function setPhoto(i, file) {
   catch { toast('이 사진 형식은 열 수 없어요. 아이폰 HEIC 사진이면 JPG로 바꿔서 올려주세요.'); return; }
   draft.sizes[i] = `${fmtSize(file.size)} → ${fmtSize(draft.photos[i].size)}`;
   draft.names[i] = null; // 새 사진: 원드라이브에 새 이름으로 올림
+  draft.meta[i] = exif;
   renderSlots();
   if (i === 0) {
     if (exif.lat != null) { draft.lat = exif.lat; draft.lng = exif.lng; setLocText(); suggest(); }
@@ -610,14 +628,22 @@ document.querySelectorAll('.slot').forEach(el => {
   const i = +el.dataset.slot;
   const open = () => { pickTarget = i; pick.value = ''; pick.click(); };
   el.addEventListener('click', e => {
-    if (e.target.classList.contains('x')) { draft.photos[i] = null; draft.names[i] = null; renderSlots(); return; }
+    if (e.target.classList.contains('x')) { draft.photos[i] = null; draft.names[i] = null; draft.meta[i] = null; renderSlots(); return; }
+    if (e.target.classList.contains('mk-main')) { swapSlots(0, i); return; }
     open();
+  });
+  el.addEventListener('dragstart', e => {
+    if (!draft || !draft.photos[i]) { e.preventDefault(); return; }
+    e.dataTransfer.setData('application/x-slot', String(i));
+    e.dataTransfer.effectAllowed = 'move';
   });
   el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
   el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('drag'); });
   el.addEventListener('dragleave', () => el.classList.remove('drag'));
   el.addEventListener('drop', e => {
     e.preventDefault(); el.classList.remove('drag');
+    const from = e.dataTransfer.getData('application/x-slot');
+    if (from !== '') { swapSlots(+from, i); return; } // 칸끼리 옮기기 = 자리 바꾸기
     const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/'));
     files.slice(0, SLOT_COUNT - i).forEach((f, k) => setPhoto(i + k, f));
   });
@@ -675,7 +701,7 @@ $('#btnSave').onclick = async () => {
 
 /* ================= 원드라이브 동기화 ================= */
 // 원드라이브 앱 폴더 구조: entries/<id>.json (글), photos/<이름>.jpg (사진), settings.json (카카오 키)
-const META_KEYS = ['id', 'date', 'place', 'memo', 'lat', 'lng', 'placeInfo', 'created', 'updated', 'takenAt'];
+const META_KEYS = ['id', 'date', 'place', 'memo', 'lat', 'lng', 'placeInfo', 'created', 'updated', 'takenAt', 'calCover'];
 const newPhotoName = (id, i) => `${id}-${i}-${Math.random().toString(36).slice(2, 8)}.jpg`;
 let syncing = null, lastSync = 0;
 
@@ -791,6 +817,7 @@ async function render() {
   current = (await dbAll()).filter(e => !e.deleted && e.date).sort((a, b) => b.date.localeCompare(a.date) || b.created - a.created);
   const u = b => { const x = URL.createObjectURL(b); urls.push(x); return x; };
   mainUrl = new Map(current.filter(e => e.main).map(e => [e.id, u(e.main)]));
+  extraUrls = new Map(current.map(e => [e.id, (e.extras || []).map(b => (b ? u(b) : null))]));
   refreshViews();
   if (!current.length) { $('#searchInfo').textContent = ''; list.innerHTML = '<p class="empty">아직 기록이 없어요. “+ 새 기록”을 눌러 첫 사진을 올려보세요.</p>'; return; }
   const q = $('#search').value.trim().toLowerCase();
@@ -803,7 +830,7 @@ async function render() {
     const month = `${y}년 ${m}월`;
     if (month !== lastMonth) { html += `<div class="month">${month}</div>`; lastMonth = month; }
     const dow = days[new Date(y, m - 1, d).getDay()];
-    const extras = (e.extras || []).filter(Boolean).map(b => `<img src="${u(b)}" alt="">`).join('');
+    const extras = (extraUrls.get(e.id) || []).filter(Boolean).map(x => `<img src="${x}" alt="">`).join('');
     const pi = e.placeInfo;
     const addr = pi ? `<div class="addr">${esc(pi.address)}${/^https:\/\//.test(pi.url || '') ? ` · <a href="${esc(pi.url)}" target="_blank" rel="noopener">지도</a>` : ''}</div>` : '';
     html += `
@@ -854,7 +881,8 @@ let searchTimer;
 $('#search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(render, 200); });
 
 /* ================= 보기 전환 (목록 / 지도 / 캘린더) ================= */
-let view = 'list', mainUrl = new Map();
+let view = 'list', mainUrl = new Map(), extraUrls = new Map();
+const slotUrl = (e, i) => (i === 0 ? mainUrl.get(e.id) : (extraUrls.get(e.id) || [])[i - 1]) || null;
 function showView(v) {
   view = v;
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === v));
@@ -862,6 +890,7 @@ function showView(v) {
   $('#viewMap').hidden = v !== 'map';
   $('#viewCal').hidden = v !== 'cal';
   $('#viewWeek').hidden = v !== 'week';
+  $('#viewYear').hidden = v !== 'year';
   try { localStorage.setItem('view', v); } catch { /* 무시 */ }
   refreshViews();
 }
@@ -869,6 +898,7 @@ function refreshViews() {
   if (view === 'map') renderBigMap();
   else if (view === 'cal') renderCal();
   else if (view === 'week') renderWeek();
+  else if (view === 'year') renderYear();
 }
 document.querySelectorAll('.tabs button').forEach(b => (b.onclick = () => showView(b.dataset.view)));
 
@@ -945,9 +975,11 @@ function renderCal() {
   let html = ['일', '월', '화', '수', '목', '금', '토'].map((w, i) => `<div class="cal-dow${i === 0 ? ' sun' : i === 6 ? ' sat' : ''}">${w}</div>`).join('');
   for (let i = 0; i < lead; i++) html += '<div class="cal-cell empty"></div>';
   for (let d = 1; d <= days; d++) {
-    const dayList = (byDay.get(d) || []).slice().reverse(); // 그날 먼저 쓴 기록이 대표
-    const e = dayList[0], iso = `${calMonth}-${String(d).padStart(2, '0')}`, dow = (lead + d - 1) % 7;
-    const url = e && mainUrl.get(e.id);
+    // 기본: 그날 가장 먼저 간 곳의 대표 사진. 날짜를 꾹 눌러 직접 고른 사진(calCover)이 있으면 그걸로.
+    const dayList = (byDay.get(d) || []).slice().sort((a, b) => timeKey(a).localeCompare(timeKey(b)));
+    const coverE = dayList.find(x => x.calCover != null && slotUrl(x, x.calCover));
+    const e = coverE || dayList[0], iso = `${calMonth}-${String(d).padStart(2, '0')}`, dow = (lead + d - 1) % 7;
+    const url = e && (coverE ? slotUrl(coverE, coverE.calCover) : slotUrl(e, 0));
     html += `<div class="cal-cell${e ? ' has' : ''}${iso === todayIso ? ' today' : ''}"${e ? ` data-id="${esc(e.id)}" data-iso="${iso}" data-n="${dayList.length}" role="button" tabindex="0" title="${esc(e.place || '')}"` : ''}>`
       + (url ? `<img src="${url}" alt="">` : '')
       + `<span class="cal-d${dow === 0 ? ' sun' : dow === 6 ? ' sat' : ''}">${d}</span>`
@@ -957,7 +989,107 @@ function renderCal() {
   $('#calGrid').innerHTML = html;
 }
 function openCalCell(c) { if (!c) return; +c.dataset.n > 1 ? goToDate(c.dataset.iso) : goToEntry(c.dataset.id); }
-$('#calGrid').addEventListener('click', ev => openCalCell(ev.target.closest('.cal-cell[data-id]')));
+// 날짜를 꾹 누르면(0.55초) 또는 오른쪽 클릭하면 그날 달력 사진 고르기
+let lpTimer = null, lpFired = false, lpStart = null;
+$('#calGrid').addEventListener('pointerdown', ev => {
+  const c = ev.target.closest('.cal-cell[data-id]');
+  if (!c) return;
+  lpFired = false; lpStart = [ev.clientX, ev.clientY];
+  clearTimeout(lpTimer);
+  lpTimer = setTimeout(() => { lpFired = true; openCoverSheet(c.dataset.iso); }, 550);
+});
+$('#calGrid').addEventListener('pointermove', ev => {
+  if (lpStart && Math.hypot(ev.clientX - lpStart[0], ev.clientY - lpStart[1]) > 10) clearTimeout(lpTimer);
+});
+['pointerup', 'pointercancel', 'pointerleave'].forEach(t => $('#calGrid').addEventListener(t, () => clearTimeout(lpTimer)));
+$('#calGrid').addEventListener('contextmenu', ev => {
+  const c = ev.target.closest('.cal-cell[data-id]');
+  if (!c) return;
+  ev.preventDefault(); clearTimeout(lpTimer); lpFired = true; openCoverSheet(c.dataset.iso);
+});
+$('#calGrid').addEventListener('click', ev => {
+  if (lpFired) { lpFired = false; return; }
+  openCalCell(ev.target.closest('.cal-cell[data-id]'));
+});
+
+/* ---------- 그날 달력 사진 고르기 ---------- */
+let coverIso = null;
+function openCoverSheet(iso) {
+  const dayList = current.filter(e => e.date === iso).sort((a, b) => timeKey(a).localeCompare(timeKey(b)));
+  if (!dayList.length) return;
+  coverIso = iso;
+  const [, m, d] = iso.split('-').map(Number);
+  $('#coverTitle').textContent = `${m}월 ${d}일 달력 사진 고르기`;
+  let html = '';
+  for (const e of dayList) for (let i = 0; i < SLOT_COUNT; i++) {
+    const url = slotUrl(e, i);
+    if (!url) continue;
+    const on = e.calCover === i;
+    html += `<button type="button" class="cover-pick${on ? ' on' : ''}" data-id="${esc(e.id)}" data-slot="${i}">`
+      + `<img src="${url}" alt=""><span>${esc(e.place || '기록')}${i ? '' : ' · 대표'}</span></button>`;
+  }
+  $('#coverGrid').innerHTML = html;
+  $('#coverSheet').hidden = false;
+}
+async function setCover(iso, id, slot) {
+  // 그날 기록들 중 고른 사진 하나에만 표시하고 나머지는 지움 (원드라이브로 동기화됨)
+  for (const e of current.filter(x => x.date === iso)) {
+    const want = e.id === id ? slot : null;
+    if ((e.calCover ?? null) === want) continue;
+    await dbPut({ ...e, calCover: want, dirty: true, updated: Date.now() });
+  }
+  $('#coverSheet').hidden = true;
+  await render();
+  toast(id ? '달력 사진을 바꿨어요.' : '그날 첫 기록의 대표 사진으로 되돌렸어요.');
+  sync();
+}
+$('#coverGrid').addEventListener('click', ev => {
+  const b = ev.target.closest('.cover-pick');
+  if (b) setCover(coverIso, b.dataset.id, +b.dataset.slot);
+});
+$('#coverReset').onclick = () => setCover(coverIso, null, null);
+$('#coverClose').onclick = () => ($('#coverSheet').hidden = true);
+$('#coverSheet').addEventListener('click', ev => { if (ev.target.id === 'coverSheet') $('#coverSheet').hidden = true; });
+
+/* ---------- 1년 사진첩: 대표·추가 사진 구분 없이 날짜순으로 쭉 ---------- */
+let albumYear = null, albumAuto = false;
+function renderYear() {
+  if (!albumYear || (albumAuto && current.length)) {
+    albumYear = current.length ? +current[0].date.slice(0, 4) : new Date().getFullYear();
+    albumAuto = !current.length;
+  }
+  $('#yearTitle').textContent = `${albumYear}년`;
+  const items = current.filter(e => e.date.startsWith(albumYear + '-'))
+    .sort((a, b) => a.date.localeCompare(b.date) || timeKey(a).localeCompare(timeKey(b)));
+  const yy = String(albumYear).slice(2);
+  if (!items.length) { $('#yearList').innerHTML = `<p class="empty">${albumYear}년에는 기록이 없어요.</p>`; return; }
+  let html = '', lastMonth = '';
+  for (const e of items) {
+    const [, m, d] = e.date.split('-');
+    if (m !== lastMonth) {
+      if (lastMonth) html += '</div>';
+      html += `<h3 class="yr-month">${yy}.${m}</h3><div class="yr-flow">`;
+      lastMonth = m;
+    }
+    const urls = [];
+    for (let i = 0; i < SLOT_COUNT; i++) { const u = slotUrl(e, i); if (u) urls.push(u); }
+    html += `<div class="yr-group"><div class="yr-date">${yy}.${m}.${d}</div><div class="yr-photos">`
+      + urls.map(u => `<button type="button" class="yr-ph" data-iso="${e.date}" title="${esc(e.place || '')}"><img src="${u}" alt="" loading="lazy"></button>`).join('')
+      + '</div></div>';
+  }
+  html += '</div>';
+  $('#yearList').innerHTML = html;
+}
+// 사진을 누르면 캘린더의 그 날짜로
+function goToCalendar(iso) {
+  calMonth = iso.slice(0, 7); calAuto = false;
+  showView('cal');
+  const c = $(`#calGrid .cal-cell[data-iso="${iso}"]`);
+  if (c) { c.scrollIntoView({ behavior: 'smooth', block: 'center' }); c.classList.add('flash'); setTimeout(() => c.classList.remove('flash'), 1800); }
+}
+$('#yearList').addEventListener('click', ev => { const b = ev.target.closest('.yr-ph'); if (b) goToCalendar(b.dataset.iso); });
+$('#yearPrev').onclick = () => { albumYear--; albumAuto = false; renderYear(); };
+$('#yearNext').onclick = () => { albumYear++; albumAuto = false; renderYear(); };
 $('#calGrid').addEventListener('keydown', ev => { if (ev.key === 'Enter') openCalCell(ev.target.closest('.cal-cell[data-id]')); });
 function shiftMonth(n) {
   const [y, m] = calMonth.split('-').map(Number), d = new Date(y, m - 1 + n, 1);
@@ -1048,7 +1180,7 @@ $('#importFile').onchange = async e => {
 updateKeyNote();
 setSyncUI();
 render().catch(() => { list.innerHTML = '<p class="empty">이 브라우저에서는 저장 공간을 쓸 수 없어요.</p>'; });
-try { const v = localStorage.getItem('view'); if (['map', 'cal', 'week'].includes(v)) showView(v); } catch { /* 무시 */ }
+try { const v = localStorage.getItem('view'); if (['map', 'cal', 'week', 'year'].includes(v)) showView(v); } catch { /* 무시 */ }
 od.handleRedirect()
   .then(justSignedIn => {
     if (justSignedIn && !sessionStorage.getItem('silentTriedAt')) toast('원드라이브에 연결했어요.');

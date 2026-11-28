@@ -27,6 +27,7 @@
     <button type="button" data-view="map">지도</button>
     <button type="button" data-view="cal">캘린더</button>
     <button type="button" data-view="week">Week</button>
+    <button type="button" data-view="year">1년</button>
   </nav>
 
   <!-- 설정 -->
@@ -135,6 +136,17 @@
       <button type="button" id="calToday" class="small">이번 달</button>
     </div>
     <div id="calGrid" class="cal-grid"></div>
+    <p class="hint">날짜를 꾹 누르면(컴퓨터는 오른쪽 클릭) 그날 달력에 보일 사진을 고를 수 있어요.</p>
+  </section>
+
+  <section id="viewYear" hidden>
+    <div class="viewbar cal-head">
+      <button type="button" id="yearPrev" aria-label="지난해">◀</button>
+      <h2 id="yearTitle"></h2>
+      <button type="button" id="yearNext" aria-label="다음 해">▶</button>
+    </div>
+    <div id="yearList" class="yr-list"></div>
+    <p class="hint">사진을 누르면 캘린더의 그 날짜로 이동해요.</p>
   </section>
 
   <section id="viewWeek" hidden>
@@ -149,6 +161,16 @@
 </div>
 
 <div class="lightbox" id="lightbox" hidden><img alt=""></div>
+<div class="sheet" id="coverSheet" hidden>
+  <div class="sheet-box" role="dialog" aria-labelledby="coverTitle">
+    <h3 id="coverTitle"></h3>
+    <div id="coverGrid" class="cover-grid"></div>
+    <div class="row">
+      <button type="button" id="coverReset">기본으로 (첫 기록 대표 사진)</button>
+      <button type="button" id="coverClose" class="primary">닫기</button>
+    </div>
+  </div>
+</div>
 <div class="toast" id="toast" hidden></div>
 
 <script type="module" src="app.js"></script>
